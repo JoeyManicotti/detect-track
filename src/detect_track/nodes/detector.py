@@ -273,7 +273,9 @@ class DetectorNode(mp.Process):
         target_sizes = torch.tensor(
             [[frame.shape[0], frame.shape[1]]], device=device
         )
-        results = processor.post_process_object_detection(
+        # post_process_object_detection lives on the image_processor,
+        # not the top-level Owlv2Processor wrapper.
+        results = processor.image_processor.post_process_object_detection(
             outputs=outputs,
             threshold=score_threshold,
             target_sizes=target_sizes,
