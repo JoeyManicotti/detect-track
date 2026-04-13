@@ -1,0 +1,78 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# detect-track  –  default pipeline configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Model paths (populated by setup.sh; can be HF repo IDs if online) ─────────
+models:
+  owlv2_path: "./models/owlv2"          # local path after offline download
+  sam2_config: "sam2_hiera_l.yaml"      # SAM2 model config name
+  sam2_checkpoint: "./models/sam2/sam2_hiera_large.pt"
+
+# ── Device assignment ──────────────────────────────────────────────────────────
+devices:
+  detector: "cuda:0"    # OWLv2  –  GPU 0
+  tracker:  "cuda:1"    # SAM2   –  GPU 1
+  # Set both to "cuda:0" if you only have one GPU (performance will degrade)
+
+# ── Video source ──────────────────────────────────────────────────────────────
+source:
+  # Integer = camera index; string = file path or RTSP URL
+  input: 0
+  # Target capture frame rate (Hz). The ingest node tries to match this.
+  capture_fps: 30
+
+# ── Throughput targets ────────────────────────────────────────────────────────
+pipeline:
+  target_fps: 30            # Desired pipeline output frame rate
+  detector_fps: 2           # How often OWLv2 runs (Hz); must be ≤ target_fps
+  # tracker_batch_size: number of frames SAM2 processes per inference call.
+  # Smaller  →  lower latency but higher overhead per frame.
+  # Larger   →  higher throughput, higher latency.
+  # Rule of thumb: target_fps / detector_fps  (one detection per batch).
+  tracker_batch_size: 15
+  tracker_overlap_frames: 5  # Overlap between consecutive SAM2 batches
+
+# ── Queue sizes ───────────────────────────────────────────────────────────────
+queues:
+  ingest_to_detector_maxsize: 4     # Drop frames if detector is too slow
+  ingest_to_tracker_maxsize:  60    # Buffer ~2 s of frames for tracker
+  detection_to_tracker_maxsize: 16
+  redetect_maxsize: 8
+  output_maxsize: 60
+
+# ── Detection settings ────────────────────────────────────────────────────────
+detection:
+  # Text prompts sent to OWLv2.  List as many objects as needed.
+  text_queries:
+    - "person"
+    - "car"
+    - "bicycle"
+  score_threshold: 0.15       # OWLv2 confidence threshold (0–1)
+  nms_iou_threshold: 0.5      # NMS IoU threshold for deduplication
+
+# ── Tracking settings ─────────────────────────────────────────────────────────
+tracking:
+  lost_mask_score_threshold: 0.30   # Below this → track is "lost"
+  max_frames_lost: 10               # Frames before issuing redetect request
+  max_active_tracks: 20             # Hard cap on simultaneous tracked objects
+
+# ── Precision ─────────────────────────────────────────────────────────────────
+precision:
+  detector_dtype: "bfloat16"   # "float32" | "float16" | "bfloat16"
+  tracker_dtype:  "bfloat16"
+
+# ── torch.compile (SAM2 only) ─────────────────────────────────────────────────
+compile:
+  enabled: false              # Set true on CUDA ≥ 8.0 for max throughput
+  mode: "max-autotune"        # "default" | "reduce-overhead" | "max-autotune"
+
+# ── Output / visualization ────────────────────────────────────────────────────
+output:
+  show_window: true           # Pop up an OpenCV preview window
+  write_video: false          # Write annotated output to a file
+  video_path: "output.mp4"
+  video_fps: 30
+  mask_alpha: 0.45            # Overlay transparency (0 = off, 1 = opaque)
+  draw_boxes: true
+  draw_labels: true
+  draw_scores: true

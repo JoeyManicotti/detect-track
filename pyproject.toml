@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "detect-track"
+version = "0.1.0"
+description = "Async OWLv2 + SAM2 detection-and-tracking pipeline at 15–30 Hz"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.3.0",
+    "torchvision>=0.18.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.30.0",
+    "opencv-python-headless>=4.9.0",
+    "Pillow>=10.3.0",
+    "numpy>=1.26.0",
+    "huggingface_hub>=0.23.0",
+    "PyYAML>=6.0.1",
+    "click>=8.1.7",
+    "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "pytest-timeout>=2.3.0"]
+
+[project.scripts]
+detect-track = "detect_track.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 120

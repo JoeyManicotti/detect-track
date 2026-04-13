@@ -1,0 +1,31 @@
+# ── Core deep-learning stack ──────────────────────────────────────────────────
+torch>=2.3.0
+torchvision>=0.18.0
+
+# ── OWLv2 (zero-shot open-vocabulary detector) ────────────────────────────────
+transformers>=4.40.0
+accelerate>=0.30.0
+
+# ── SAM2 (video segmentation & tracking) ──────────────────────────────────────
+# Install from source: pip install git+https://github.com/facebookresearch/sam2.git
+# Listed here for documentation purposes; setup.sh handles the install.
+# sam2
+
+# ── Computer vision utilities ──────────────────────────────────────────────────
+opencv-python-headless>=4.9.0
+Pillow>=10.3.0
+numpy>=1.26.0
+
+# ── Model hub & offline support ────────────────────────────────────────────────
+huggingface_hub>=0.23.0
+
+# ── Configuration & CLI ───────────────────────────────────────────────────────
+PyYAML>=6.0.1
+click>=8.1.7
+
+# ── Monitoring & logging ──────────────────────────────────────────────────────
+tqdm>=4.66.0
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-timeout>=2.3.0
