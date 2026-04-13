@@ -5,8 +5,8 @@
 # ── Model paths (populated by setup.sh; can be HF repo IDs if online) ─────────
 models:
   owlv2_path: "./models/owlv2"          # local path after offline download
-  sam2_config: "sam2_hiera_l.yaml"      # SAM2 model config name
-  sam2_checkpoint: "./models/sam2/sam2_hiera_large.pt"
+  sam2_config: "sam2_hiera_s.yaml"      # SAM2 model config name (s=small, l=large)
+  sam2_checkpoint: "./models/sam2/sam2_hiera_small.pt"
 
 # ── Device assignment ──────────────────────────────────────────────────────────
 devices:
