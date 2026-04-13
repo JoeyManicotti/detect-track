@@ -211,11 +211,29 @@ def run(
     vw: Optional[VideoWriter] = None
     display_interval = 1.0 / max(1.0, float(cfg["pipeline"]["target_fps"]))
 
+    # ── Loading splash — push immediately so the browser shows something
+    # while GPU models warm up (OWLv2 ~8s first inference, SAM2 ~15-22s).
+    def _make_loading_frame(h: int = 480, w: int = 854) -> np.ndarray:
+        frame = np.zeros((h, w, 3), dtype=np.uint8)
+        msg = "Loading models, please wait..."
+        (tw, th), _ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+        cv2.putText(
+            frame, msg,
+            ((w - tw) // 2, (h + th) // 2),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (180, 180, 180), 2,
+        )
+        return frame
+
+    loading_frame = _make_loading_frame()
+    streaming.push_frame(loading_frame)
+    logger.info("Loading splash pushed to streaming server.")
+
     try:
         with Pipeline(cfg) as pipeline:
             last_bgr: Optional[np.ndarray] = None
             last_result = None
             last_push = 0.0
+            last_loading_push = time.monotonic()
 
             while True:
                 # Poll for the next result; short timeout keeps the loop responsive.
@@ -250,11 +268,19 @@ def run(
                             vw = VideoWriter(out_path, out_fps, (w, h))
                         vw.write(bgr)
 
-                # Push at target fps — new frame or hold last frame.
                 now = time.monotonic()
-                if now - last_push >= display_interval and last_bgr is not None:
-                    streaming.push_frame(last_bgr, last_result)
-                    last_push = now
+
+                if last_bgr is not None:
+                    # Push at target fps — new frame or hold last frame.
+                    if now - last_push >= display_interval:
+                        streaming.push_frame(last_bgr, last_result)
+                        last_push = now
+                else:
+                    # Still loading: re-push the loading splash once per second
+                    # so the MJPEG stream stays alive for connected browsers.
+                    if now - last_loading_push >= 1.0:
+                        streaming.push_frame(loading_frame)
+                        last_loading_push = now
 
                 # Exit when pipeline is done and queue is empty.
                 if result is None and not pipeline.is_running():
