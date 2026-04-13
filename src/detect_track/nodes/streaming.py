@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # Self-contained browser UI (no CDN, fully offline)
 # ---------------------------------------------------------------------------
 
-_INDEX_HTML = b"""\
+_INDEX_HTML = """\
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -306,7 +306,7 @@ pollTracks();
 </script>
 </body>
 </html>
-"""
+""".encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
