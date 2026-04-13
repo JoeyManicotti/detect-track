@@ -125,9 +125,6 @@ class _SAM2StreamingTracker:
         # Detection waiting to be applied at the next batch anchor.
         self._pending_detection: Optional[DetectionResult] = None
 
-        # Absolute frame counter (never resets).
-        self._abs_frame_count: int = 0
-
         # Create a temporary directory for JPEG frame storage.
         # Prefer /dev/shm (RAM-backed on Linux) for speed, fall back to
         # system temp dir if /dev/shm is not writable.
@@ -142,10 +139,19 @@ class _SAM2StreamingTracker:
         self._pending_detection = detection
 
     def ingest_frame(
-        self, frame: np.ndarray
+        self, frame: np.ndarray, frame_id: int
     ) -> Tuple[Optional[TrackResult], List[RedetectRequest]]:
         """
         Accept one RGB frame.
+
+        Parameters
+        ----------
+        frame:
+            RGB uint8 ndarray.
+        frame_id:
+            The *actual* shared-memory frame identifier from IngestNode.
+            Used as the key for ``pipeline.read_frame()`` so the consumer
+            can retrieve the correct slot.
 
         Returns
         -------
@@ -156,8 +162,7 @@ class _SAM2StreamingTracker:
             List of ``RedetectRequest`` objects for tracks that were lost
             in the most recently processed batch.
         """
-        self._frame_deque.append((self._abs_frame_count, frame.copy()))
-        self._abs_frame_count += 1
+        self._frame_deque.append((frame_id, frame.copy()))
 
         redetect_requests: List[RedetectRequest] = []
 
@@ -569,6 +574,8 @@ class TrackerNode(mp.Process):
         streaming_tracker = _SAM2StreamingTracker(predictor, device, self.config)
 
         frames_processed = 0
+        results_emitted = 0
+        _log_interval = 30  # log throughput every N frames
 
         try:
             while not self.stop_event.is_set():
@@ -576,8 +583,8 @@ class TrackerNode(mp.Process):
                 try:
                     det: DetectionResult = self.detection_queue.get_nowait()
                     streaming_tracker.feed_detection(det)
-                    logger.debug(
-                        "Tracker received %d detections for frame %d",
+                    logger.info(
+                        "Tracker received %d detection(s) for frame %d",
                         len(det.boxes), det.frame_id,
                     )
                 except queue.Empty:
@@ -605,7 +612,9 @@ class TrackerNode(mp.Process):
 
                 # ── Run tracker ────────────────────────────────────────
                 try:
-                    result, redetect_reqs = streaming_tracker.ingest_frame(frame)
+                    result, redetect_reqs = streaming_tracker.ingest_frame(
+                        frame, meta.frame_id
+                    )
                 except Exception as exc:
                     logger.error(
                         "Tracker error on frame %d: %s", meta.frame_id, exc,
@@ -636,7 +645,19 @@ class TrackerNode(mp.Process):
                     except Exception:
                         pass
 
+                if result is not None:
+                    results_emitted += 1
+
                 frames_processed += 1
+                if frames_processed % _log_interval == 0:
+                    logger.info(
+                        "TrackerNode: %d frames in, %d results out, "
+                        "%d active tracks, output_q depth %d",
+                        frames_processed,
+                        results_emitted,
+                        len(streaming_tracker._tracks),
+                        self.output_queue.qsize(),
+                    )
 
         except KeyboardInterrupt:
             pass

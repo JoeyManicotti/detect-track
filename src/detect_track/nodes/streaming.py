@@ -34,6 +34,8 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import List, Optional
 
+import numpy as np
+
 import cv2
 import numpy as np
 
@@ -166,6 +168,9 @@ class StreamingServer:
         self._jpeg: Optional[bytes] = None
         self._frame_id: int = 0
         self._tracks: List[dict] = []
+        self._push_count: int = 0          # total frames pushed
+        self._push_times: List[float] = [] # recent push timestamps for fps
+        self._start_time: float = time.monotonic()
 
         self._server: Optional[_ThreadedHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -211,10 +216,28 @@ class StreamingServer:
                 for t in result.tracks
             ]
 
+        now = time.monotonic()
         with self._lock:
             self._jpeg = buf.tobytes()
             self._frame_id += 1
             self._tracks = tracks
+            self._push_count += 1
+            self._push_times.append(now)
+            # Keep only last 2 s of timestamps for fps estimate.
+            cutoff = now - 2.0
+            self._push_times = [t for t in self._push_times if t > cutoff]
+
+        if self._push_count == 1:
+            logger.info("First frame pushed to streaming server.")
+        elif self._push_count % 100 == 0:
+            with self._lock:
+                n = len(self._push_times)
+                span = (self._push_times[-1] - self._push_times[0]) if n > 1 else 1
+                fps = (n - 1) / span if span > 0 else 0
+            logger.info(
+                "Stream: %d frames pushed total, %.1f fps (last 2s)",
+                self._push_count, fps,
+            )
 
     def start(self) -> None:
         """Start the HTTP server in a background daemon thread."""
@@ -231,6 +254,8 @@ class StreamingServer:
                     self._mjpeg()
                 elif path == "/tracks":
                     self._json_tracks()
+                elif path == "/status":
+                    self._json_status()
                 elif path in ("/", "/index.html"):
                     self._html()
                 elif path == "/health":
@@ -271,6 +296,27 @@ class StreamingServer:
                         self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError, OSError):
                         break
+
+            # ── Status JSON ────────────────────────────────────────
+            def _json_status(self) -> None:
+                with streaming._lock:
+                    n = len(streaming._push_times)
+                    span = (streaming._push_times[-1] - streaming._push_times[0]) if n > 1 else 1
+                    fps = round((n - 1) / span, 1) if span > 0 and n > 1 else 0.0
+                    body = json.dumps({
+                        "uptime_s": round(time.monotonic() - streaming._start_time, 1),
+                        "frames_pushed": streaming._push_count,
+                        "stream_fps": fps,
+                        "latest_frame_id": streaming._frame_id,
+                        "active_tracks": len(streaming._tracks),
+                    }).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(body)
 
             # ── JSON track snapshot ────────────────────────────────
             def _json_tracks(self) -> None:
