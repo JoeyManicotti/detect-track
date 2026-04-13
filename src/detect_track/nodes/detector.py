@@ -194,19 +194,33 @@ class DetectorNode(mp.Process):
                     break
 
                 meta: FrameMetadata = item
-                frame = frame_buffer.read(meta, copy=True)
+
+                try:
+                    frame = frame_buffer.read(meta, copy=True)
+                except Exception as exc:
+                    logger.warning(
+                        "SHM read failed for frame %d: %s", meta.frame_id, exc
+                    )
+                    continue
 
                 # ── Run OWLv2 inference ───────────────────────────────
-                t0 = time.monotonic()
-                result = self._detect(
-                    frame, processor, model, device, torch_dtype,
-                    text_queries, score_threshold, nms_iou, meta.frame_id
-                )
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                logger.debug(
-                    "OWLv2 frame %d: %d detections in %.1f ms",
-                    meta.frame_id, len(result.boxes), elapsed_ms,
-                )
+                try:
+                    t0 = time.monotonic()
+                    result = self._detect(
+                        frame, processor, model, device, torch_dtype,
+                        text_queries, score_threshold, nms_iou, meta.frame_id
+                    )
+                    elapsed_ms = (time.monotonic() - t0) * 1000
+                    logger.info(
+                        "OWLv2 frame %d: %d detections in %.1f ms",
+                        meta.frame_id, len(result.boxes), elapsed_ms,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "OWLv2 inference failed on frame %d: %s",
+                        meta.frame_id, exc, exc_info=True,
+                    )
+                    continue
 
                 if not result.is_empty():
                     try:

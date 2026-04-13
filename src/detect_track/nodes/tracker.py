@@ -44,6 +44,7 @@ import multiprocessing as mp
 import os
 import queue
 import shutil
+import tempfile
 import time
 from collections import deque
 from pathlib import Path
@@ -64,9 +65,6 @@ from detect_track.ipc.messages import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Path for temporary JPEG frame storage (RAM-backed on Linux).
-_FRAME_DIR = Path("/dev/shm/detect_track_sam2")
 
 
 # ---------------------------------------------------------------------------
@@ -130,8 +128,10 @@ class _SAM2StreamingTracker:
         # Absolute frame counter (never resets).
         self._abs_frame_count: int = 0
 
-        # Initialise on-disk frame directory.
-        _FRAME_DIR.mkdir(parents=True, exist_ok=True)
+        # Create a temporary directory for JPEG frame storage.
+        # Prefer /dev/shm (RAM-backed on Linux) for speed, fall back to
+        # system temp dir if /dev/shm is not writable.
+        self._frame_dir = self._create_frame_dir()
 
     # ------------------------------------------------------------------
     # Public interface
@@ -185,7 +185,7 @@ class _SAM2StreamingTracker:
         return results
 
     def cleanup(self) -> None:
-        shutil.rmtree(str(_FRAME_DIR), ignore_errors=True)
+        shutil.rmtree(str(self._frame_dir), ignore_errors=True)
 
     # ------------------------------------------------------------------
     # Batch processing
@@ -195,7 +195,7 @@ class _SAM2StreamingTracker:
         """
         Run SAM2 on the current frame deque.
 
-        1. Write frames to /dev/shm.
+        1. Write frames as JPEG to temp directory.
         2. ``init_state`` → load all frames.
         3. Transfer masks from previous batch (anchor frame = frame 0).
         4. Apply pending detection prompts (anchor frame = frame 0).
@@ -208,16 +208,60 @@ class _SAM2StreamingTracker:
         if not frames:
             return []
 
+        # If there are no existing tracks and no pending detection, skip
+        # the expensive SAM2 call — just emit empty results.
+        if not self._tracks and self._pending_detection is None:
+            for abs_frame_id, _ in frames:
+                self._result_queue.append(
+                    TrackResult(frame_id=abs_frame_id, tracks=[])
+                )
+            self._trim_deque()
+            return []
+
         t0 = time.monotonic()
 
-        # ── 1. Write frames to /dev/shm ────────────────────────────────
+        # ── 1. Write frames as JPEG ───────────────────────────────────
         self._clear_frame_dir()
+        written = 0
         for local_idx, (_, rgb) in enumerate(frames):
-            self._write_jpeg(local_idx, rgb)
+            if self._write_jpeg(local_idx, rgb):
+                written += 1
+
+        if written == 0:
+            logger.error(
+                "Failed to write any JPEG frames to %s — skipping batch. "
+                "Check disk space and permissions.", self._frame_dir,
+            )
+            for abs_frame_id, _ in frames:
+                self._result_queue.append(
+                    TrackResult(frame_id=abs_frame_id, tracks=[])
+                )
+            self._trim_deque()
+            return []
+
+        # Verify at least one file is visible to the filesystem.
+        frame_dir = self._frame_dir
+        on_disk = [f for f in os.listdir(frame_dir)
+                    if os.path.splitext(f)[-1].lower() in (".jpg", ".jpeg")]
+        if not on_disk:
+            logger.error(
+                "Wrote %d JPEGs but os.listdir(%s) sees 0 files. "
+                "Filesystem issue — skipping batch.", written, frame_dir,
+            )
+            for abs_frame_id, _ in frames:
+                self._result_queue.append(
+                    TrackResult(frame_id=abs_frame_id, tracks=[])
+                )
+            self._trim_deque()
+            return []
+
+        logger.debug(
+            "Wrote %d/%d JPEGs to %s", written, len(frames), frame_dir,
+        )
 
         # ── 2. Initialise SAM2 state ───────────────────────────────────
         inference_state = self.predictor.init_state(
-            video_path=str(_FRAME_DIR),
+            video_path=str(frame_dir),
             offload_video_to_cpu=False,
             offload_state_to_cpu=False,
             async_loading_frames=False,
@@ -295,19 +339,23 @@ class _SAM2StreamingTracker:
             )
 
         # ── 7. Trim deque to overlap ───────────────────────────────────
-        overlap_frames = list(self._frame_deque)[-self.overlap :]
-        self._frame_deque.clear()
-        for item in overlap_frames:
-            self._frame_deque.append(item)
+        self._trim_deque()
 
         elapsed_ms = (time.monotonic() - t0) * 1000
-        logger.debug(
+        logger.info(
             "SAM2 batch: %d frames, %d tracks, %.0f ms",
             len(frames), len(self._tracks), elapsed_ms,
         )
 
         # ── 8. Emit redetect requests for lost tracks ──────────────────
         return self._collect_redetect_requests(frames[-1][0])
+
+    def _trim_deque(self) -> None:
+        """Keep only the last ``overlap`` frames in the deque."""
+        overlap_frames = list(self._frame_deque)[-self.overlap :]
+        self._frame_deque.clear()
+        for item in overlap_frames:
+            self._frame_deque.append(item)
 
     def _process_frame_output(
         self,
@@ -377,15 +425,46 @@ class _SAM2StreamingTracker:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _clear_frame_dir() -> None:
-        for p in _FRAME_DIR.glob("*.jpg"):
+    def _create_frame_dir() -> Path:
+        """Create a temporary directory for SAM2 JPEG frame storage.
+
+        Tries /dev/shm (RAM-backed on Linux) first for speed, then falls
+        back to the system default temp directory.
+        """
+        for base in ("/dev/shm", None):
+            try:
+                d = tempfile.mkdtemp(prefix="sam2_batch_", dir=base)
+                logger.info("SAM2 frame directory: %s", d)
+                return Path(d)
+            except OSError:
+                continue
+        # Should never reach here — tempfile with dir=None always works.
+        raise RuntimeError("Cannot create temporary directory for SAM2 frames")
+
+    def _clear_frame_dir(self) -> None:
+        for p in self._frame_dir.glob("*.jpg"):
             p.unlink(missing_ok=True)
 
-    @staticmethod
-    def _write_jpeg(local_idx: int, rgb: np.ndarray) -> None:
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        path = str(_FRAME_DIR / f"{local_idx:06d}.jpg")
-        cv2.imwrite(path, bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    def _write_jpeg(self, local_idx: int, rgb: np.ndarray) -> bool:
+        """Write one frame as JPEG.  Returns True on success."""
+        path = str(self._frame_dir / f"{local_idx:06d}.jpg")
+        try:
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            ok = cv2.imwrite(path, bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            if ok:
+                return True
+            # cv2 failed silently — fall back to PIL.
+            logger.debug("cv2.imwrite failed for %s, trying PIL", path)
+        except Exception as exc:
+            logger.debug("cv2.imwrite raised for %s: %s, trying PIL", path, exc)
+
+        try:
+            from PIL import Image as PILImage
+            PILImage.fromarray(rgb).save(path, quality=95)
+            return True
+        except Exception as exc:
+            logger.error("Failed to write frame %d: %s", local_idx, exc)
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -513,10 +592,26 @@ class TrackerNode(mp.Process):
                     break
 
                 meta: FrameMetadata = item
-                frame = frame_buffer.read(meta, copy=True)
+
+                try:
+                    frame = frame_buffer.read(meta, copy=True)
+                except Exception as exc:
+                    logger.warning(
+                        "SHM read failed for frame %d: %s", meta.frame_id, exc
+                    )
+                    continue
 
                 # ── Run tracker ────────────────────────────────────────
-                result, redetect_reqs = streaming_tracker.ingest_frame(frame)
+                try:
+                    result, redetect_reqs = streaming_tracker.ingest_frame(frame)
+                except Exception as exc:
+                    logger.error(
+                        "Tracker error on frame %d: %s", meta.frame_id, exc,
+                        exc_info=True,
+                    )
+                    # Emit an empty result so the consumer stays in sync.
+                    result = TrackResult(frame_id=meta.frame_id, tracks=[])
+                    redetect_reqs = []
 
                 # ── Forward output ────────────────────────────────────
                 if result is not None:
