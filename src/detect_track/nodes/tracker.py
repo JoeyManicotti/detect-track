@@ -552,6 +552,11 @@ class TrackerNode(mp.Process):
                     pass
             streaming_tracker.cleanup()
             frame_buffer.cleanup()
+            # Signal the consumer that no more results will arrive.
+            try:
+                self.output_queue.put_nowait(StopSignal())
+            except Exception:
+                pass
             logger.info("TrackerNode stopped after %d frames.", frames_processed)
 
     # ------------------------------------------------------------------

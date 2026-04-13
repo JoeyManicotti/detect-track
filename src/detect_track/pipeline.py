@@ -211,7 +211,17 @@ class Pipeline:
         logger.info("Pipeline stopped.")
 
     def is_running(self) -> bool:
-        return self._running and self._ingest.is_alive()
+        if not self._running:
+            return False
+        # Pipeline is "running" as long as any node might still produce output.
+        # After ingest finishes (e.g. end of file), the detector and tracker
+        # may still be processing queued frames.
+        return (
+            self._ingest.is_alive()
+            or self._detector.is_alive()
+            or self._tracker.is_alive()
+            or not self._output_queue.empty()
+        )
 
     # ------------------------------------------------------------------
     # Result consumption

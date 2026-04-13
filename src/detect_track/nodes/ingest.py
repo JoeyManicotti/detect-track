@@ -90,6 +90,10 @@ class IngestNode(mp.Process):
         self.tracker_queue = tracker_queue
         self.config = config
         self.stop_event = stop_event
+        # For file sources, use blocking puts so we don't outrun the GPU
+        # nodes.  For live cameras, use non-blocking drain-and-put to keep
+        # the camera loop from stalling.
+        self._is_live = isinstance(source, int)
 
     # ------------------------------------------------------------------
     # Process entry point
@@ -149,12 +153,19 @@ class IngestNode(mp.Process):
                 # Write to shared memory and get metadata pointer.
                 meta: FrameMetadata = self.frame_buffer.write(frame_id, frame)
 
-                # Always deliver to tracker (full fps).
-                _drain_and_put(self.tracker_queue, meta)
-
-                # Deliver to detector at reduced rate.
-                if frame_id % detector_period == 0:
-                    _drain_and_put(self.detector_queue, meta)
+                if self._is_live:
+                    # Live camera: drop stale frames rather than stalling
+                    # the capture loop.
+                    _drain_and_put(self.tracker_queue, meta)
+                    if frame_id % detector_period == 0:
+                        _drain_and_put(self.detector_queue, meta)
+                else:
+                    # File source: block until consumers catch up so we
+                    # don't blast through the entire video before the GPU
+                    # nodes finish loading.
+                    self._blocking_put(self.tracker_queue, meta)
+                    if frame_id % detector_period == 0:
+                        self._blocking_put(self.detector_queue, meta)
 
                 frame_id += 1
 
@@ -176,6 +187,15 @@ class IngestNode(mp.Process):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _blocking_put(self, q: Queue, item: Any, poll: float = 0.1) -> None:
+        """Block until *item* is placed in *q*, checking stop_event periodically."""
+        while not self.stop_event.is_set():
+            try:
+                q.put(item, timeout=poll)
+                return
+            except Exception:  # queue.Full
+                continue
 
     def _send_stop(self) -> None:
         """Push StopSignal to all downstream queues."""
