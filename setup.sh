@@ -32,7 +32,7 @@ SAM2_DIR="./models/sam2"
 OWLV2_REPO="google/owlv2-base-patch16-ensemble"
 SAM2_REPO="facebook/sam2-hiera-large"
 CUDA_VERSION="cu121"          # Change to cu118 / cu124 / cpu as needed
-TORCH_VERSION="2.3.0"
+TORCH_VERSION="2.5.1"
 
 # ── Parse arguments ────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do

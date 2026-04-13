@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "Async OWLv2 + SAM2 detection-and-tracking pipeline at 15–30 Hz"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.3.0",
-    "torchvision>=0.18.0",
+    "torch>=2.5.1",
+    "torchvision>=0.20.1",
     "transformers>=4.40.0",
     "accelerate>=0.30.0",
     "opencv-python-headless>=4.9.0",

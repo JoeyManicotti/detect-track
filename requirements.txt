@@ -1,6 +1,6 @@
 # ── Core deep-learning stack ──────────────────────────────────────────────────
-torch>=2.3.0
-torchvision>=0.18.0
+torch>=2.5.1
+torchvision>=0.20.1
 
 # ── OWLv2 (zero-shot open-vocabulary detector) ────────────────────────────────
 transformers>=4.40.0

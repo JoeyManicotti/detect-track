@@ -80,7 +80,7 @@ COPY configs/ configs/
 
 # ── Install Python dependencies ────────────────────────────────────────────────
 # PyTorch with CUDA 12.1
-RUN pip install --no-cache-dir torch==2.3.0 torchvision \
+RUN pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 \
       --index-url https://download.pytorch.org/whl/cu121
 
 # SAM2 from source
