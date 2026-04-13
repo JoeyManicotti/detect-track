@@ -84,6 +84,8 @@ def _apply_overrides(config: dict, **overrides: object) -> dict:
     if overrides.get("write_video") is not None:
         out["write_video"] = True
         out["video_path"] = overrides["write_video"]
+    if overrides.get("detector_model") is not None:
+        det["detector_model"] = overrides["detector_model"]
 
     return config
 
@@ -129,7 +131,16 @@ def cli() -> None:
               help="HTTP streaming server port (default: from config, usually 8080).")
 @click.option("--host", default=None, metavar="HOST",
               help="HTTP server bind address (default: 0.0.0.0).")
-@click.option("--write-video", default=None, metavar="PATH", help="Write output video to PATH.")
+@click.option(
+    "--output", "-o",
+    "write_video",
+    default=None,
+    metavar="PATH",
+    help="Save annotated output video to PATH (e.g. -o out.mp4).",
+)
+@click.option("--detector-model", default=None,
+              type=click.Choice(["owlv2", "owlv1"], case_sensitive=False),
+              help="Detection model variant (default: owlv2).")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Enable debug logging.")
 def run(
     config: str,
@@ -143,6 +154,7 @@ def run(
     port: Optional[int],
     host: Optional[str],
     write_video: Optional[str],
+    detector_model: Optional[str],
     verbose: bool,
 ) -> None:
     """Launch the pipeline and stream results to a browser via HTTP."""
@@ -160,6 +172,7 @@ def run(
         detector_device=detector_device,
         tracker_device=tracker_device,
         write_video=write_video,
+        detector_model=detector_model,
     )
 
     # Streaming server settings (CLI overrides config).
@@ -167,12 +180,15 @@ def run(
     serve_host  = host or stream_cfg.get("host", "0.0.0.0")
     serve_port  = port or int(stream_cfg.get("port", 8080))
 
+    model_name = cfg["detection"].get("detector_model", "owlv2").upper()
     logger.info("Text queries: %s", cfg["detection"]["text_queries"])
-    logger.info("Detector: %s @ %.1f Hz", cfg["devices"]["detector"],
-                cfg["pipeline"]["detector_fps"])
-    logger.info("Tracker:  %s @ %.1f Hz target", cfg["devices"]["tracker"],
-                cfg["pipeline"]["target_fps"])
+    logger.info("Detector: %s (%s) @ %.1f Hz on %s",
+                model_name, cfg["models"]["owlv2_path"],
+                cfg["pipeline"]["detector_fps"], cfg["devices"]["detector"])
+    logger.info("Tracker:  SAM2 @ %.1f Hz target on %s",
+                cfg["pipeline"]["target_fps"], cfg["devices"]["tracker"])
 
+    import time
     import numpy as np
     import cv2
     from detect_track.pipeline import Pipeline
@@ -184,51 +200,65 @@ def run(
     out_path  = vis_cfg.get("video_path", "output.mp4")
     out_fps   = float(vis_cfg.get("video_fps", cfg["pipeline"]["target_fps"]))
 
-    if write_video:
-        write_out = True
-        out_path  = write_video
-
     streaming = StreamingServer(host=serve_host, port=serve_port)
     streaming.start()
     click.echo(
         f"\n  View in browser → http://localhost:{serve_port}/\n"
+        f"  Waiting for models to load …\n"
         f"  Press Ctrl-C to stop.\n"
     )
 
     vw: Optional[VideoWriter] = None
+    display_interval = 1.0 / max(1.0, float(cfg["pipeline"]["target_fps"]))
 
     try:
         with Pipeline(cfg) as pipeline:
-            for result in pipeline.results():
-                # Read the actual frame from shared memory so the browser
-                # sees the real video, not a synthetic canvas.
-                frame_rgb = pipeline.read_frame(result.frame_id)
-                if frame_rgb is None:
-                    # Slot already overwritten — synthesise a placeholder.
-                    frame_rgb = np.zeros(pipeline._frame_shape, dtype=np.uint8)
+            last_bgr: Optional[np.ndarray] = None
+            last_result = None
+            last_push = 0.0
 
-                bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            while True:
+                # Poll for the next result; short timeout keeps the loop responsive.
+                result = pipeline.get_result(timeout=display_interval)
 
-                # Annotate: boxes, labels, HUD.
-                draw_tracks(
-                    bgr, result,
-                    mask_alpha=float(vis_cfg.get("mask_alpha", 0.45)),
-                    draw_boxes=bool(vis_cfg.get("draw_boxes", True)),
-                    draw_labels=bool(vis_cfg.get("draw_labels", True)),
-                    draw_scores=bool(vis_cfg.get("draw_scores", True)),
-                )
-                draw_hud(bgr, frame_id=result.frame_id,
-                         num_tracks=len(result.tracks))
+                if result is not None:
+                    # Read the actual frame from shared memory.
+                    frame_rgb = pipeline.read_frame(result.frame_id)
+                    if frame_rgb is None:
+                        frame_rgb = np.zeros(pipeline._frame_shape, dtype=np.uint8)
 
-                # Push to MJPEG stream.
-                streaming.push_frame(bgr, result)
+                    bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-                # Optionally write to disk.
-                if write_out:
-                    if vw is None:
-                        h, w = bgr.shape[:2]
-                        vw = VideoWriter(out_path, out_fps, (w, h))
-                    vw.write(bgr)
+                    # Annotate: masks, boxes, labels, HUD.
+                    draw_tracks(
+                        bgr, result,
+                        mask_alpha=float(vis_cfg.get("mask_alpha", 0.45)),
+                        draw_boxes=bool(vis_cfg.get("draw_boxes", True)),
+                        draw_labels=bool(vis_cfg.get("draw_labels", True)),
+                        draw_scores=bool(vis_cfg.get("draw_scores", True)),
+                    )
+                    draw_hud(bgr, frame_id=result.frame_id,
+                             num_tracks=len(result.tracks))
+
+                    last_bgr = bgr
+                    last_result = result
+
+                    # Optionally write to disk.
+                    if write_out:
+                        if vw is None:
+                            h, w = bgr.shape[:2]
+                            vw = VideoWriter(out_path, out_fps, (w, h))
+                        vw.write(bgr)
+
+                # Push at target fps — new frame or hold last frame.
+                now = time.monotonic()
+                if now - last_push >= display_interval and last_bgr is not None:
+                    streaming.push_frame(last_bgr, last_result)
+                    last_push = now
+
+                # Exit when pipeline is done and queue is empty.
+                if result is None and not pipeline.is_running():
+                    break
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
@@ -236,6 +266,8 @@ def run(
         streaming.stop()
         if vw:
             vw.release()
+        if write_out and vw is not None:
+            click.echo(f"\n  Video saved → {out_path}")
 
 
 # ---------------------------------------------------------------------------

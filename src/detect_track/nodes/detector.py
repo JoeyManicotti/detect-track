@@ -116,6 +116,7 @@ class DetectorNode(mp.Process):
         redetect_queue: Queue,
         config: dict,
         stop_event: mp.Event,
+        ready_event: Optional[mp.Event] = None,
     ) -> None:
         super().__init__(name="DetectorNode", daemon=True)
         self.frame_buffer_config = frame_buffer_config
@@ -124,6 +125,7 @@ class DetectorNode(mp.Process):
         self.redetect_queue = redetect_queue
         self.config = config
         self.stop_event = stop_event
+        self.ready_event = ready_event
 
     # ------------------------------------------------------------------
     # Process entry point
@@ -135,25 +137,41 @@ class DetectorNode(mp.Process):
         os.environ["HF_DATASETS_OFFLINE"] = "1"
         os.environ["HF_HUB_OFFLINE"] = "1"
 
-        # ── Late imports (only needed in this subprocess) ──────────────
-        from transformers import Owlv2ForObjectDetection, Owlv2Processor
-
         logger.info("DetectorNode starting on %s", self.config["devices"]["detector"])
 
         device = torch.device(self.config["devices"]["detector"])
         dtype_str = self.config["precision"]["detector_dtype"]
         torch_dtype = getattr(torch, dtype_str, torch.bfloat16)
 
+        # ── Determine model variant ────────────────────────────────────
+        # "owlv2" (default) or "owlv1"
+        model_variant = str(
+            self.config.get("detection", {}).get("detector_model", "owlv2")
+        ).lower()
+
         # ── Load model from local path ─────────────────────────────────
         model_path = self.config["models"]["owlv2_path"]
-        logger.info("Loading OWLv2 from %s …", model_path)
-        processor = Owlv2Processor.from_pretrained(model_path)
-        model = Owlv2ForObjectDetection.from_pretrained(
-            model_path,
-            torch_dtype=torch_dtype,
-        ).to(device)
+        logger.info("Loading %s from %s …", model_variant, model_path)
+
+        if model_variant == "owlv1":
+            from transformers import OwlViTForObjectDetection, OwlViTProcessor
+            processor = OwlViTProcessor.from_pretrained(model_path)
+            model = OwlViTForObjectDetection.from_pretrained(
+                model_path, torch_dtype=torch_dtype,
+            ).to(device)
+        else:
+            from transformers import Owlv2ForObjectDetection, Owlv2Processor
+            processor = Owlv2Processor.from_pretrained(model_path)
+            model = Owlv2ForObjectDetection.from_pretrained(
+                model_path, torch_dtype=torch_dtype,
+            ).to(device)
+
         model.eval()
-        logger.info("OWLv2 loaded.")
+        logger.info("%s loaded.", model_variant)
+
+        if self.ready_event is not None:
+            self.ready_event.set()
+            logger.info("DetectorNode signalled ready.")
 
         # ── Attach shared-memory reader ────────────────────────────────
         fb_cfg = self.frame_buffer_config
@@ -282,14 +300,14 @@ class DetectorNode(mp.Process):
         with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch_dtype):
             outputs = model(**inputs)
 
-        # Post-process: OWLv2 returns boxes in cx,cy,w,h (normalised).
-        # post_process_object_detection converts to x1,y1,x2,y2 (pixel).
+        # Post-process: convert normalised cx,cy,w,h boxes → x1,y1,x2,y2 (pixel).
+        # post_process_object_detection lives on the image_processor sub-object
+        # for OWLv2; for OWLv1 it may be on the processor itself.
         target_sizes = torch.tensor(
             [[frame.shape[0], frame.shape[1]]], device=device
         )
-        # post_process_object_detection lives on the image_processor,
-        # not the top-level Owlv2Processor wrapper.
-        results = processor.image_processor.post_process_object_detection(
+        img_proc = getattr(processor, "image_processor", processor)
+        results = img_proc.post_process_object_detection(
             outputs=outputs,
             threshold=score_threshold,
             target_sizes=target_sizes,

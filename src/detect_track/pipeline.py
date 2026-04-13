@@ -138,8 +138,13 @@ class Pipeline:
         self._redetect_queue  = ctx.Queue(maxsize=q["redetect_maxsize"])
         self._output_queue    = ctx.Queue(maxsize=q["output_maxsize"])
 
-        # ── Shared stop event ──────────────────────────────────────────
+        # ── Shared events ──────────────────────────────────────────────
         self._stop_event = ctx.Event()
+        # Each model process sets its ready event when weights are loaded.
+        self._detector_ready = ctx.Event()
+        self._tracker_ready  = ctx.Event()
+        # IngestNode waits on this before reading the first frame.
+        self._ingest_start   = ctx.Event()
 
         # ── Build nodes (not yet started) ──────────────────────────────
         self._ingest = IngestNode(
@@ -149,6 +154,7 @@ class Pipeline:
             tracker_queue=self._tracker_queue,
             config=config,
             stop_event=self._stop_event,
+            start_event=self._ingest_start,
         )
         self._detector = DetectorNode(
             frame_buffer_config=self._fb_config,
@@ -157,6 +163,7 @@ class Pipeline:
             redetect_queue=self._redetect_queue,
             config=config,
             stop_event=self._stop_event,
+            ready_event=self._detector_ready,
         )
         self._tracker = TrackerNode(
             frame_buffer_config=self._fb_config,
@@ -166,6 +173,7 @@ class Pipeline:
             output_queue=self._output_queue,
             config=config,
             stop_event=self._stop_event,
+            ready_event=self._tracker_ready,
         )
 
         self._running = False
@@ -184,6 +192,16 @@ class Pipeline:
         self._ingest.start()
         self._running = True
         logger.info("Pipeline running.")
+
+        # Background thread: wait for both models, then release IngestNode.
+        import threading
+        def _release_ingest() -> None:
+            self._detector_ready.wait()
+            self._tracker_ready.wait()
+            logger.info("Both models ready — releasing IngestNode.")
+            self._ingest_start.set()
+        threading.Thread(target=_release_ingest, daemon=True,
+                         name="ModelReadyWatcher").start()
 
     def stop(self, timeout: float = 5.0) -> None:
         """

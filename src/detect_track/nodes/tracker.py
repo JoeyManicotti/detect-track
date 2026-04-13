@@ -428,18 +428,14 @@ class _SAM2StreamingTracker:
     def _create_frame_dir() -> Path:
         """Create a temporary directory for SAM2 JPEG frame storage.
 
-        Tries /dev/shm (RAM-backed on Linux) first for speed, then falls
-        back to the system default temp directory.
+        Uses the system temp directory (/tmp) rather than /dev/shm because
+        /dev/shm is already occupied by the shared-memory ring buffer.
+        /tmp is backed by disk but the small JPEG files (< 5 MB per batch)
+        are negligible compared to GPU processing time.
         """
-        for base in ("/dev/shm", None):
-            try:
-                d = tempfile.mkdtemp(prefix="sam2_batch_", dir=base)
-                logger.info("SAM2 frame directory: %s", d)
-                return Path(d)
-            except OSError:
-                continue
-        # Should never reach here — tempfile with dir=None always works.
-        raise RuntimeError("Cannot create temporary directory for SAM2 frames")
+        d = tempfile.mkdtemp(prefix="sam2_batch_")
+        logger.info("SAM2 frame directory: %s", d)
+        return Path(d)
 
     def _clear_frame_dir(self) -> None:
         for p in self._frame_dir.glob("*.jpg"):
@@ -517,6 +513,7 @@ class TrackerNode(mp.Process):
         output_queue: Queue,
         config: dict,
         stop_event: mp.Event,
+        ready_event: Optional[mp.Event] = None,
     ) -> None:
         super().__init__(name="TrackerNode", daemon=True)
         self.frame_buffer_config = frame_buffer_config
@@ -526,6 +523,7 @@ class TrackerNode(mp.Process):
         self.output_queue = output_queue
         self.config = config
         self.stop_event = stop_event
+        self.ready_event = ready_event
 
     # ------------------------------------------------------------------
     # Process entry point
@@ -555,6 +553,10 @@ class TrackerNode(mp.Process):
                 )
             except Exception as exc:
                 logger.warning("torch.compile failed (skipping): %s", exc)
+
+        if self.ready_event is not None:
+            self.ready_event.set()
+            logger.info("TrackerNode signalled ready.")
 
         # ── Attach shared-memory reader ────────────────────────────────
         fb_cfg = self.frame_buffer_config

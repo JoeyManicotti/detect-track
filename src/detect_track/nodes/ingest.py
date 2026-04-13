@@ -82,6 +82,7 @@ class IngestNode(mp.Process):
         tracker_queue: Queue,
         config: dict,
         stop_event: mp.Event,
+        start_event: Optional[mp.Event] = None,
     ) -> None:
         super().__init__(name="IngestNode", daemon=True)
         self.source = source
@@ -90,6 +91,7 @@ class IngestNode(mp.Process):
         self.tracker_queue = tracker_queue
         self.config = config
         self.stop_event = stop_event
+        self.start_event = start_event
         # For file sources, use blocking puts so we don't outrun the GPU
         # nodes.  For live cameras, use non-blocking drain-and-put to keep
         # the camera loop from stalling.
@@ -100,6 +102,18 @@ class IngestNode(mp.Process):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
+        # Wait for both GPU models to load before sending any frames so we
+        # don't fill the tracker queue with frames the tracker can't process.
+        if self.start_event is not None:
+            logger.info("IngestNode waiting for models to load …")
+            ready = self.start_event.wait(timeout=180)
+            if ready:
+                logger.info("Models ready — starting video.")
+            else:
+                logger.warning(
+                    "Models did not signal ready within 180 s — starting anyway."
+                )
+
         logger.info("IngestNode started (source=%s)", self.source)
 
         cap = cv2.VideoCapture(self.source)

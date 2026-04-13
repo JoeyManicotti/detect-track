@@ -42,12 +42,15 @@ queues:
 
 # ── Detection settings ────────────────────────────────────────────────────────
 detection:
-  # Text prompts sent to OWLv2.  List as many objects as needed.
+  # "owlv2" (default, higher accuracy) or "owlv1" (faster, smaller).
+  # Override on CLI: --detector-model owlv1
+  detector_model: "owlv2"
+  # Text prompts.  List as many objects as needed.
   text_queries:
     - "person"
     - "car"
     - "bicycle"
-  score_threshold: 0.15       # OWLv2 confidence threshold (0–1)
+  score_threshold: 0.15       # Detection confidence threshold (0–1)
   nms_iou_threshold: 0.5      # NMS IoU threshold for deduplication
 
 # ── Tracking settings ─────────────────────────────────────────────────────────
