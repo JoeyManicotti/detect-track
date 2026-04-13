@@ -81,8 +81,6 @@ def _apply_overrides(config: dict, **overrides: object) -> dict:
         config["devices"]["detector"] = overrides["detector_device"]
     if overrides.get("tracker_device") is not None:
         config["devices"]["tracker"] = overrides["tracker_device"]
-    if overrides.get("no_window"):
-        out["show_window"] = False
     if overrides.get("write_video") is not None:
         out["write_video"] = True
         out["video_path"] = overrides["write_video"]
@@ -127,7 +125,10 @@ def cli() -> None:
 @click.option("--target-fps",   default=None, type=float, help="Pipeline output target (Hz).")
 @click.option("--detector-device", default=None, help="PyTorch device for OWLv2 (e.g. cuda:0).")
 @click.option("--tracker-device",  default=None, help="PyTorch device for SAM2 (e.g. cuda:1).")
-@click.option("--no-window", is_flag=True, default=False, help="Disable preview window.")
+@click.option("--port", "-p", default=None, type=int, metavar="PORT",
+              help="HTTP streaming server port (default: from config, usually 8080).")
+@click.option("--host", default=None, metavar="HOST",
+              help="HTTP server bind address (default: 0.0.0.0).")
 @click.option("--write-video", default=None, metavar="PATH", help="Write output video to PATH.")
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Enable debug logging.")
 def run(
@@ -139,11 +140,12 @@ def run(
     target_fps: Optional[float],
     detector_device: Optional[str],
     tracker_device: Optional[str],
-    no_window: bool,
+    port: Optional[int],
+    host: Optional[str],
     write_video: Optional[str],
     verbose: bool,
 ) -> None:
-    """Launch the full detection-and-tracking pipeline."""
+    """Launch the pipeline and stream results to a browser via HTTP."""
     _setup_logging(verbose)
     logger = logging.getLogger(__name__)
 
@@ -157,9 +159,13 @@ def run(
         target_fps=target_fps,
         detector_device=detector_device,
         tracker_device=tracker_device,
-        no_window=no_window,
         write_video=write_video,
     )
+
+    # Streaming server settings (CLI overrides config).
+    stream_cfg  = cfg.setdefault("streaming", {})
+    serve_host  = host or stream_cfg.get("host", "0.0.0.0")
+    serve_port  = port or int(stream_cfg.get("port", 8080))
 
     logger.info("Text queries: %s", cfg["detection"]["text_queries"])
     logger.info("Detector: %s @ %.1f Hz", cfg["devices"]["detector"],
@@ -168,67 +174,66 @@ def run(
                 cfg["pipeline"]["target_fps"])
 
     import numpy as np
-    from detect_track.pipeline import Pipeline
-    from detect_track.utils.visualization import PreviewWindow, VideoWriter, draw_tracks, draw_hud
     import cv2
+    from detect_track.pipeline import Pipeline
+    from detect_track.nodes.streaming import StreamingServer
+    from detect_track.utils.visualization import VideoWriter, draw_tracks, draw_hud
 
-    show_window = cfg["output"]["show_window"]
-    write_out   = cfg["output"]["write_video"]
-    out_path    = cfg["output"].get("video_path", "output.mp4")
-    out_fps     = float(cfg["output"].get("video_fps", cfg["pipeline"]["target_fps"]))
+    vis_cfg  = cfg.get("output", {})
+    write_out = bool(vis_cfg.get("write_video", False))
+    out_path  = vis_cfg.get("video_path", "output.mp4")
+    out_fps   = float(vis_cfg.get("video_fps", cfg["pipeline"]["target_fps"]))
 
-    win: Optional[PreviewWindow] = None
-    vw:  Optional[VideoWriter]   = None
-    frame_shape = None
+    if write_video:
+        write_out = True
+        out_path  = write_video
+
+    streaming = StreamingServer(host=serve_host, port=serve_port)
+    streaming.start()
+    click.echo(
+        f"\n  View in browser → http://localhost:{serve_port}/\n"
+        f"  Press Ctrl-C to stop.\n"
+    )
+
+    vw: Optional[VideoWriter] = None
 
     try:
         with Pipeline(cfg) as pipeline:
-            if show_window:
-                win = PreviewWindow("detect-track")
-
             for result in pipeline.results():
-                if not result.has_tracks() and not show_window:
-                    continue
+                # Read the actual frame from shared memory so the browser
+                # sees the real video, not a synthetic canvas.
+                frame_rgb = pipeline.read_frame(result.frame_id)
+                if frame_rgb is None:
+                    # Slot already overwritten — synthesise a placeholder.
+                    frame_rgb = np.zeros(pipeline._frame_shape, dtype=np.uint8)
 
-                # We don't carry raw frames through the output queue.
-                # For visualisation, synthesise a blank frame or use the
-                # shared memory buffer.  Here we display a placeholder so
-                # the window stays alive; production consumers should read
-                # the shared memory directly.
-                if show_window or write_out:
-                    # Attempt to read the annotated frame from shared memory.
-                    # If unavailable, render on a black canvas.
-                    canvas = np.zeros(
-                        pipeline._frame_shape, dtype=np.uint8
-                    ) if frame_shape is None else np.zeros(frame_shape, dtype=np.uint8)
-                    frame_shape = canvas.shape
+                bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-                    vis_cfg = cfg.get("output", {})
-                    draw_tracks(
-                        canvas, result,
-                        mask_alpha=float(vis_cfg.get("mask_alpha", 0.45)),
-                        draw_boxes=bool(vis_cfg.get("draw_boxes", True)),
-                        draw_labels=bool(vis_cfg.get("draw_labels", True)),
-                        draw_scores=bool(vis_cfg.get("draw_scores", True)),
-                    )
-                    draw_hud(canvas, frame_id=result.frame_id,
-                             num_tracks=len(result.tracks))
-                    bgr = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
+                # Annotate: boxes, labels, HUD.
+                draw_tracks(
+                    bgr, result,
+                    mask_alpha=float(vis_cfg.get("mask_alpha", 0.45)),
+                    draw_boxes=bool(vis_cfg.get("draw_boxes", True)),
+                    draw_labels=bool(vis_cfg.get("draw_labels", True)),
+                    draw_scores=bool(vis_cfg.get("draw_scores", True)),
+                )
+                draw_hud(bgr, frame_id=result.frame_id,
+                         num_tracks=len(result.tracks))
 
-                    if write_out and vw is None:
+                # Push to MJPEG stream.
+                streaming.push_frame(bgr, result)
+
+                # Optionally write to disk.
+                if write_out:
+                    if vw is None:
                         h, w = bgr.shape[:2]
                         vw = VideoWriter(out_path, out_fps, (w, h))
-                    if vw:
-                        vw.write(bgr)
-                    if win:
-                        if win.show(bgr) is None:   # 'q' pressed
-                            break
+                    vw.write(bgr)
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
     finally:
-        if win:
-            win.close()
+        streaming.stop()
         if vw:
             vw.release()
 

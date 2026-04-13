@@ -66,9 +66,13 @@ compile:
   enabled: false              # Set true on CUDA ≥ 8.0 for max throughput
   mode: "max-autotune"        # "default" | "reduce-overhead" | "max-autotune"
 
+# ── HTTP streaming server ─────────────────────────────────────────────────────
+streaming:
+  host: "0.0.0.0"   # bind to all interfaces; use 127.0.0.1 for localhost only
+  port: 8080         # override with --port on the CLI
+
 # ── Output / visualization ────────────────────────────────────────────────────
 output:
-  show_window: true           # Pop up an OpenCV preview window
   write_video: false          # Write annotated output to a file
   video_path: "output.mp4"
   video_fps: 30

@@ -102,10 +102,16 @@ class Pipeline:
         if verify:
             verify_models(config)
 
+        # ── Resolve source to an absolute path so subprocesses can find it
+        # regardless of their CWD.  Camera indices (int) are kept as-is.
+        raw_source = config["source"]["input"]
+        if isinstance(raw_source, str):
+            import os
+            config["source"]["input"] = os.path.abspath(raw_source)
+        self._source = config["source"]["input"]
+
         # ── Resolve frame shape from the capture source ────────────────
-        self._frame_shape = self._probe_frame_shape(
-            config["source"]["input"],
-        )
+        self._frame_shape = self._probe_frame_shape(self._source)
         logger.info("Frame shape: %s", self._frame_shape)
 
         # ── Shared-memory ring buffer ──────────────────────────────────
@@ -245,6 +251,30 @@ class Pipeline:
                 return None
             return item
         except queue.Empty:
+            return None
+
+    def read_frame(self, frame_id: int) -> Optional[np.ndarray]:
+        """
+        Read a raw RGB frame from the shared-memory ring buffer by frame ID.
+
+        Returns *None* if the slot has already been overwritten or an error
+        occurs.  The ring buffer has ``_SHM_CAPACITY`` (128) slots, giving a
+        window of ~4 seconds at 30 fps before a slot is reused.
+        """
+        from detect_track.ipc.messages import FrameMetadata
+
+        try:
+            name = self._shm_buffer._block_name(frame_id)
+            meta = FrameMetadata(
+                frame_id=frame_id,
+                shm_name=name,
+                height=self._frame_shape[0],
+                width=self._frame_shape[1],
+                channels=self._frame_shape[2],
+                dtype="uint8",
+            )
+            return self._shm_buffer.read(meta, copy=True)
+        except Exception:
             return None
 
     # ------------------------------------------------------------------

@@ -104,6 +104,18 @@ class IngestNode(mp.Process):
             self._send_stop()
             return
 
+        # Log video properties to help diagnose codec / format issues.
+        src_fps    = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        src_width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        src_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        src_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fourcc_int = int(cap.get(cv2.CAP_PROP_FOURCC))
+        fourcc_str = "".join(chr((fourcc_int >> (8 * i)) & 0xFF) for i in range(4)).strip()
+        logger.info(
+            "Video: %dx%d @ %.1f fps, %d frames, codec=%r",
+            src_width, src_height, src_fps, src_frames, fourcc_str,
+        )
+
         target_fps: float = float(self.config["pipeline"]["target_fps"])
         detector_fps: float = float(self.config["pipeline"]["detector_fps"])
         frame_interval: float = 1.0 / target_fps
@@ -118,7 +130,17 @@ class IngestNode(mp.Process):
             while not self.stop_event.is_set():
                 ret, bgr = cap.read()
                 if not ret:
-                    logger.info("Video source exhausted or disconnected.")
+                    if frame_id == 0:
+                        logger.error(
+                            "First frame read failed on %r. "
+                            "This is usually a codec issue. "
+                            "Try re-encoding: ffmpeg -i input.mp4 -c:v libx264 -crf 23 output.mp4",
+                            self.source,
+                        )
+                    else:
+                        logger.info(
+                            "Video source exhausted after %d frames.", frame_id
+                        )
                     break
 
                 # Convert BGR → RGB for model compatibility.
