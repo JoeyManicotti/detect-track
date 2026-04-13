@@ -197,6 +197,15 @@ dropZone.addEventListener('drop',e=>{
 });
 
 // ── upload ────────────────────────────────────────────────────────
+// Read a cookie by name — needed for JupyterHub XSRF token.
+function getCookie(name){
+  for(const c of document.cookie.split(';')){
+    const[k,v]=c.trim().split('=',2);
+    if(k===name)return decodeURIComponent(v||'');
+  }
+  return '';
+}
+
 uploadBtn.onclick=async()=>{
   if(!selectedFile)return;
   uploadBtn.disabled=true;
@@ -208,6 +217,9 @@ uploadBtn.onclick=async()=>{
   fd.append('file',selectedFile);
   const xhr=new XMLHttpRequest();
   xhr.open('POST','/upload');
+  // JupyterHub (and similar proxies) require X-XSRFToken on POST requests.
+  const xsrf=getCookie('_xsrf');
+  if(xsrf) xhr.setRequestHeader('X-XSRFToken',xsrf);
   xhr.upload.onprogress=e=>{
     if(e.lengthComputable)uploadBar.style.width=(e.loaded/e.total*100)+'%';
   };
@@ -215,10 +227,9 @@ uploadBtn.onclick=async()=>{
     if(xhr.status===202){
       uploadMsg.textContent='Processing\u2026';
       uploadBar.style.width='100%';
-      // switch to video view
       showVideoPanel();
     } else {
-      uploadMsg.textContent='Upload failed ('+xhr.status+')';
+      uploadMsg.textContent='Upload failed ('+xhr.status+'). Check server logs.';
       uploadBtn.disabled=false;
     }
   };
@@ -247,8 +258,8 @@ function showVideoPanel(){
 }
 
 newVideoBtn.onclick=()=>{
-  // Signal server to stop, return to upload view
-  fetch('/stop',{method:'POST'}).catch(()=>{});
+  const xsrf=getCookie('_xsrf');
+  fetch('/stop',{method:'POST',headers:xsrf?{'X-XSRFToken':xsrf}:{}}).catch(()=>{});
   showUploadPanel();
 };
 
@@ -482,6 +493,16 @@ class StreamingServer:
                     self._text(b"ok")
                 else:
                     self.send_error(404)
+
+            def do_OPTIONS(self) -> None:  # noqa: N802
+                """Handle CORS preflight — some proxies send this before POST."""
+                self.send_response(200)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers",
+                                 "Content-Type, X-XSRFToken")
+                self.send_header("Access-Control-Max-Age", "86400")
+                self.end_headers()
 
             def do_POST(self) -> None:  # noqa: N802
                 path = self.path.split("?")[0]
