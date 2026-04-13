@@ -154,8 +154,9 @@ def run(
     logger.info("Tracker:  %s @ %.1f Hz target", cfg["devices"]["tracker"],
                 cfg["pipeline"]["target_fps"])
 
+    import numpy as np
     from detect_track.pipeline import Pipeline
-    from detect_track.utils.visualization import PreviewWindow, VideoWriter
+    from detect_track.utils.visualization import PreviewWindow, VideoWriter, draw_tracks, draw_hud
     import cv2
 
     show_window = cfg["output"]["show_window"]
@@ -189,8 +190,14 @@ def run(
                     ) if frame_shape is None else np.zeros(frame_shape, dtype=np.uint8)
                     frame_shape = canvas.shape
 
-                    from detect_track.utils.visualization import draw_tracks, draw_hud
-                    draw_tracks(canvas, result, config=cfg)
+                    vis_cfg = cfg.get("output", {})
+                    draw_tracks(
+                        canvas, result,
+                        mask_alpha=float(vis_cfg.get("mask_alpha", 0.45)),
+                        draw_boxes=bool(vis_cfg.get("draw_boxes", True)),
+                        draw_labels=bool(vis_cfg.get("draw_labels", True)),
+                        draw_scores=bool(vis_cfg.get("draw_scores", True)),
+                    )
                     draw_hud(canvas, frame_id=result.frame_id,
                              num_tracks=len(result.tracks))
                     bgr = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)

@@ -127,6 +127,12 @@ fi
 echo ""
 log "Setup complete!"
 echo ""
+if $CREATE_VENV; then
+  echo "  *** Activate the virtual environment first: ***"
+  echo ""
+  echo "    source ${VENV_DIR}/bin/activate"
+  echo ""
+fi
 echo "  Run the pipeline:"
 echo "    detect-track run --queries 'person' 'car'"
 echo ""
