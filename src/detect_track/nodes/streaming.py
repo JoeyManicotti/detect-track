@@ -505,7 +505,9 @@ class StreamingServer:
                 self.end_headers()
 
             def do_POST(self) -> None:  # noqa: N802
-                path = self.path.split("?")[0]
+                # Normalise: strip trailing slash, keep bare "/" as "/"
+                path = (self.path.split("?")[0].rstrip("/") or "/")
+                logger.info("POST %s (raw: %s)", path, self.path)
                 if path == "/upload":
                     self._handle_upload()
                 elif path == "/stop":
@@ -513,6 +515,7 @@ class StreamingServer:
                     streaming.set_pipeline_state("idle")
                     self._json({"ok": True})
                 else:
+                    logger.warning("POST 404: unrecognised path %r", path)
                     self.send_error(404)
 
             # ── MJPEG stream ───────────────────────────────────────
@@ -552,7 +555,10 @@ class StreamingServer:
             # ── File upload ────────────────────────────────────────
             def _handle_upload(self) -> None:
                 content_type = self.headers.get("Content-Type", "")
+                logger.info("Upload request: Content-Type=%r Content-Length=%s",
+                            content_type, self.headers.get("Content-Length"))
                 if "multipart/form-data" not in content_type:
+                    logger.warning("Upload rejected: not multipart/form-data")
                     self.send_error(400, "Expected multipart/form-data")
                     return
 
