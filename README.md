@@ -118,7 +118,7 @@ Model weights are downloaded **at image build time** and baked in. The container
 ```bash
 # Two-GPU system
 docker run --gpus all --shm-size=4g detect-track:latest \
-  detect-track run --queries "person" "car"
+  detect-track run -q person -q car
 
 # Single-GPU system
 docker run --gpus all --shm-size=4g detect-track:latest \
@@ -130,7 +130,7 @@ docker run --gpus all --shm-size=4g detect-track:latest \
 docker run --gpus all --shm-size=4g \
   -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix \
   detect-track:latest \
-  detect-track run --queries "person"
+  detect-track run -q person
 ```
 
 ### Option C — Manual install
@@ -190,8 +190,17 @@ detect-track run
 
 ### Run with custom queries
 
+Repeat `-q` for multiple objects, or pass a comma/space-separated list in one flag:
+
 ```bash
-detect-track run --queries "person" "red backpack" "bicycle"
+# Repeat the flag (most explicit)
+detect-track run -q person -q car -q bicycle
+
+# Comma-separated in one flag (convenient)
+detect-track run --queries 'person,car,bicycle'
+
+# Space-separated in one flag (also works)
+detect-track run --queries 'person car bicycle'
 ```
 
 ### Run on a video file
@@ -229,7 +238,8 @@ detect-track run --help
 
   --config,  -c PATH          YAML config file (default: configs/default.yaml)
   --source,  -s SOURCE        Camera index (int) or file/RTSP URL
-  --queries, -q TEXT          Text queries (repeatable: -q person -q car)
+  --queries, -q QUERY         Repeat for multiple (-q person -q car) or use
+                              comma/space-separated in one flag (-q 'person,car')
   --threshold, -t FLOAT       Detection confidence threshold
   --detector-fps FLOAT        OWLv2 inference rate in Hz
   --target-fps FLOAT          Pipeline output target in Hz

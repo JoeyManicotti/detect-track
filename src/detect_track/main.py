@@ -68,7 +68,13 @@ def _apply_overrides(config: dict, **overrides: object) -> dict:
     if overrides.get("target_fps") is not None:
         pip["target_fps"] = float(overrides["target_fps"])
     if overrides.get("queries"):
-        det["text_queries"] = list(overrides["queries"])
+        import re
+        # Each flag value may itself contain comma/space-separated tokens, e.g.
+        #   -q "person,car"  or  -q "person car"  or  -q person -q car
+        merged: list[str] = []
+        for token in overrides["queries"]:
+            merged.extend(t.strip() for t in re.split(r"[,\s]+", token) if t.strip())
+        det["text_queries"] = merged
     if overrides.get("threshold") is not None:
         det["score_threshold"] = float(overrides["threshold"])
     if overrides.get("detector_device") is not None:
@@ -106,8 +112,15 @@ def cli() -> None:
 )
 @click.option("--source", "-s", default=None, help="Video source (int or path/URL).")
 @click.option(
-    "--queries", "-q", multiple=True,
-    help="Text queries for OWLv2, e.g. -q person -q car",
+    "--queries", "-q",
+    "queries",
+    multiple=True,
+    metavar="QUERY",
+    help=(
+        "Text query for OWLv2. Repeat the flag for multiple objects "
+        "(-q person -q car) or pass a comma/space-separated list in one flag "
+        "(-q 'person,car,bicycle'). Both forms may be combined."
+    ),
 )
 @click.option("--threshold", "-t", default=None, type=float, help="Detection score threshold.")
 @click.option("--detector-fps", default=None, type=float, help="OWLv2 inference rate (Hz).")
