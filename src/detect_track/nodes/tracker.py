@@ -224,6 +224,11 @@ class _SAM2StreamingTracker:
             return []
 
         t0 = time.monotonic()
+        logger.info(
+            "SAM2 batch start: %d frames, %d existing tracks, detection=%s",
+            len(frames), len(self._tracks),
+            self._pending_detection is not None,
+        )
 
         # ── 1. Write frames as JPEG ───────────────────────────────────
         self._clear_frame_dir()
@@ -231,6 +236,9 @@ class _SAM2StreamingTracker:
         for local_idx, (_, rgb) in enumerate(frames):
             if self._write_jpeg(local_idx, rgb):
                 written += 1
+
+        jpeg_ms = (time.monotonic() - t0) * 1000
+        logger.info("SAM2 batch: wrote %d/%d JPEGs in %.0f ms", written, len(frames), jpeg_ms)
 
         if written == 0:
             logger.error(
@@ -260,11 +268,16 @@ class _SAM2StreamingTracker:
             self._trim_deque()
             return []
 
-        logger.debug(
-            "Wrote %d/%d JPEGs to %s", written, len(frames), frame_dir,
-        )
-
         # ── 2. Initialise SAM2 state ───────────────────────────────────
+        # NOTE: The FIRST call to init_state() on a new GPU/resolution
+        # triggers CUDA kernel JIT compilation — this can take 5-15 minutes
+        # on first run but is cached for all subsequent calls.
+        t_init = time.monotonic()
+        logger.info(
+            "SAM2 init_state: loading %d frames from %s "
+            "(first call on new hardware may take several minutes for CUDA JIT)",
+            written, frame_dir,
+        )
         inference_state = self.predictor.init_state(
             video_path=str(frame_dir),
             offload_video_to_cpu=False,
@@ -272,6 +285,7 @@ class _SAM2StreamingTracker:
             async_loading_frames=False,
         )
         self.predictor.reset_state(inference_state)
+        logger.info("SAM2 init_state done in %.1f s", time.monotonic() - t_init)
 
         anchor_idx = 0  # Anchor frame for new prompts within this batch.
 
@@ -321,6 +335,11 @@ class _SAM2StreamingTracker:
             local_idx: [] for local_idx in range(len(frames))
         }
 
+        t_prop = time.monotonic()
+        logger.info(
+            "SAM2 propagate_in_video: %d frames, %d tracks",
+            len(frames), len(self._tracks),
+        )
         try:
             for out_frame_idx, out_obj_ids, out_mask_logits in (
                 self.predictor.propagate_in_video(
@@ -332,7 +351,12 @@ class _SAM2StreamingTracker:
                     frame_results,
                 )
         except Exception as exc:
-            logger.error("SAM2 propagation error: %s", exc)
+            logger.error("SAM2 propagation error: %s", exc, exc_info=True)
+
+        logger.info(
+            "SAM2 propagate_in_video done in %.1f s (%d frames)",
+            time.monotonic() - t_prop, len(frames),
+        )
 
         # ── 6. Buffer TrackResult objects ──────────────────────────────
         for local_idx, (abs_frame_id, _) in enumerate(frames):

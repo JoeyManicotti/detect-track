@@ -276,9 +276,9 @@ def run(
                         streaming.push_frame(last_bgr, last_result)
                         last_push = now
                 else:
-                    # Still loading: re-push the loading splash once per second
-                    # so the MJPEG stream stays alive for connected browsers.
-                    if now - last_loading_push >= 1.0:
+                    # Still loading: keep the MJPEG stream alive at full fps
+                    # so browsers don't disconnect while models warm up.
+                    if now - last_loading_push >= display_interval:
                         streaming.push_frame(loading_frame)
                         last_loading_push = now
 
@@ -294,6 +294,183 @@ def run(
             vw.release()
         if write_out and vw is not None:
             click.echo(f"\n  Video saved → {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# serve command  (server mode — accepts video uploads from the browser)
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option(
+    "--config", "-c",
+    default="configs/default.yaml",
+    show_default=True,
+    help="Path to YAML config file.",
+)
+@click.option(
+    "--queries", "-q",
+    "queries",
+    multiple=True,
+    metavar="QUERY",
+    help="Text query for OWLv2 (repeat for multiple objects).",
+)
+@click.option("--threshold", "-t", default=None, type=float, help="Detection score threshold.")
+@click.option("--detector-fps", default=None, type=float, help="OWLv2 inference rate (Hz).")
+@click.option("--target-fps",   default=None, type=float, help="Pipeline output target (Hz).")
+@click.option("--detector-device", default=None, help="PyTorch device for OWLv2 (e.g. cuda:0).")
+@click.option("--tracker-device",  default=None, help="PyTorch device for SAM2 (e.g. cuda:1).")
+@click.option("--port", "-p", default=None, type=int, metavar="PORT",
+              help="HTTP streaming server port (default: from config, usually 8080).")
+@click.option("--host", default=None, metavar="HOST",
+              help="HTTP server bind address (default: 0.0.0.0).")
+@click.option("--detector-model", default=None,
+              type=click.Choice(["owlv2", "owlv1"], case_sensitive=False),
+              help="Detection model variant (default: owlv2).")
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Enable debug logging.")
+def serve(
+    config: str,
+    queries: tuple,
+    threshold: Optional[float],
+    detector_fps: Optional[float],
+    target_fps: Optional[float],
+    detector_device: Optional[str],
+    tracker_device: Optional[str],
+    port: Optional[int],
+    host: Optional[str],
+    detector_model: Optional[str],
+    verbose: bool,
+) -> None:
+    """Start an HTTP server that accepts video uploads and streams annotated results."""
+    _setup_logging(verbose)
+    logger = logging.getLogger(__name__)
+
+    base_cfg = _load_config(config)
+    base_cfg = _apply_overrides(
+        base_cfg,
+        queries=queries or None,
+        threshold=threshold,
+        detector_fps=detector_fps,
+        target_fps=target_fps,
+        detector_device=detector_device,
+        tracker_device=tracker_device,
+        detector_model=detector_model,
+    )
+
+    stream_cfg = base_cfg.setdefault("streaming", {})
+    serve_host  = host or stream_cfg.get("host", "0.0.0.0")
+    serve_port  = port or int(stream_cfg.get("port", 8080))
+
+    import time
+    import numpy as np
+    import cv2
+    from detect_track.pipeline import Pipeline
+    from detect_track.nodes.streaming import StreamingServer
+    from detect_track.utils.visualization import draw_tracks, draw_hud
+
+    streaming = StreamingServer(host=serve_host, port=serve_port)
+    streaming.start()
+    click.echo(
+        f"\n  detect-track server → http://localhost:{serve_port}/\n"
+        f"  Open the URL above, upload a video, and watch it process.\n"
+        f"  Press Ctrl-C to stop.\n"
+    )
+
+    vis_cfg = base_cfg.get("output", {})
+    display_interval = 1.0 / max(1.0, float(base_cfg["pipeline"]["target_fps"]))
+
+    # Loading splash shown while waiting for uploads or model loading.
+    def _loading_frame(msg: str = "Waiting for video upload…", h: int = 480, w: int = 854) -> np.ndarray:
+        frame = np.zeros((h, w, 3), dtype=np.uint8)
+        (tw, th), _ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        cv2.putText(frame, msg, ((w - tw) // 2, (h + th) // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 2)
+        return frame
+
+    idle_frame = _loading_frame("Waiting for video upload\u2026")
+    loading_frame_bgr = _loading_frame("Loading models, please wait\u2026")
+    streaming.push_frame(idle_frame)
+
+    try:
+        while True:
+            # ── Wait for a video to be uploaded ─────────────────────
+            logger.info("Waiting for video upload on /upload …")
+            video_path = streaming.wait_for_upload()
+            if video_path is None:
+                break
+
+            logger.info("Processing uploaded video: %s", video_path)
+
+            # Build config for this specific video.
+            import copy
+            cfg = copy.deepcopy(base_cfg)
+            import os as _os
+            cfg["source"]["input"] = _os.path.abspath(video_path)
+
+            streaming.set_pipeline_state("loading")
+
+            # Push model-loading splash while pipeline initialises.
+            last_loading_push = time.monotonic()
+            last_bgr: Optional[np.ndarray] = None
+            last_result = None
+            last_push = 0.0
+
+            try:
+                with Pipeline(cfg) as pipeline:
+                    streaming.set_pipeline_state("running")
+
+                    while not streaming.stop_requested():
+                        result = pipeline.get_result(timeout=display_interval)
+
+                        if result is not None:
+                            frame_rgb = pipeline.read_frame(result.frame_id)
+                            if frame_rgb is None:
+                                frame_rgb = np.zeros(pipeline._frame_shape, dtype=np.uint8)
+                            bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                            draw_tracks(
+                                bgr, result,
+                                mask_alpha=float(vis_cfg.get("mask_alpha", 0.45)),
+                                draw_boxes=bool(vis_cfg.get("draw_boxes", True)),
+                                draw_labels=bool(vis_cfg.get("draw_labels", True)),
+                                draw_scores=bool(vis_cfg.get("draw_scores", True)),
+                            )
+                            draw_hud(bgr, frame_id=result.frame_id,
+                                     num_tracks=len(result.tracks))
+                            last_bgr = bgr
+                            last_result = result
+
+                        now = time.monotonic()
+                        if last_bgr is not None:
+                            if now - last_push >= display_interval:
+                                streaming.push_frame(last_bgr, last_result)
+                                last_push = now
+                        else:
+                            if now - last_loading_push >= display_interval:
+                                streaming.push_frame(loading_frame_bgr)
+                                last_loading_push = now
+
+                        if result is None and not pipeline.is_running():
+                            break
+
+            except Exception as exc:
+                logger.error("Pipeline error: %s", exc, exc_info=True)
+                streaming.set_pipeline_state("error")
+            else:
+                streaming.set_pipeline_state("done")
+
+            # Clean up the uploaded temp file.
+            try:
+                _os.unlink(video_path)
+            except OSError:
+                pass
+
+            # Return to idle — push waiting frame.
+            streaming.push_frame(idle_frame)
+            logger.info("Ready for next upload.")
+
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user.")
+    finally:
+        streaming.stop()
 
 
 # ---------------------------------------------------------------------------
